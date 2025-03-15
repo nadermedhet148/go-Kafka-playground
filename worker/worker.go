@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
@@ -10,60 +11,62 @@ import (
 )
 
 func main() {
-
+	groupID := "example-group"
 	topic := "comments"
-	worker, err := connectConsumer([]string{"localhost:29092"})
-	if err != nil {
-		panic(err)
-	}
 
-	// Calling ConsumePartition. It will open one connection per broker
-	// and share it for all partitions that live on it.
-	consumer, err := worker.ConsumePartition(topic, 0, sarama.OffsetOldest)
+	config := sarama.NewConfig()
+	config.Version = sarama.V2_1_0_0
+	config.Consumer.Group.Rebalance.Strategy = sarama.BalanceStrategyRoundRobin
+	config.Consumer.Offsets.Initial = sarama.OffsetOldest
+
+	consumerGroup, err := sarama.NewConsumerGroup([]string{"localhost:29092"}, groupID, config)
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println("Consumer started ")
+	defer func() {
+		if err := consumerGroup.Close(); err != nil {
+			panic(err)
+		}
+	}()
+
+	fmt.Println("Consumer group started")
 	sigchan := make(chan os.Signal, 1)
 	signal.Notify(sigchan, syscall.SIGINT, syscall.SIGTERM)
-	// Count how many message processed
-	msgCount := 0
 
-	// Get signal for finish
-	doneCh := make(chan struct{})
+	handler := ConsumerGroupHandler{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	go func() {
 		for {
-			select {
-			case err := <-consumer.Errors():
-				fmt.Println(err)
-			case msg := <-consumer.Messages():
-				msgCount++
-				fmt.Printf("Received message Count %d: | Topic(%s) | Message(%s) \n", msgCount, string(msg.Topic), string(msg.Value))
-			case <-sigchan:
-				fmt.Println("Interrupt is detected")
-				doneCh <- struct{}{}
+			if err := consumerGroup.Consume(ctx, []string{topic}, &handler); err != nil {
+				fmt.Println("Error from consumer group:", err)
 			}
 		}
 	}()
 
-	<-doneCh
-	fmt.Println("Processed", msgCount, "messages")
-
-	if err := worker.Close(); err != nil {
-		panic(err)
-	}
-
+	<-sigchan
+	fmt.Println("Interrupt is detected")
 }
 
-func connectConsumer(brokersUrl []string) (sarama.Consumer, error) {
-	config := sarama.NewConfig()
-	config.Consumer.Return.Errors = true
+// ConsumerGroupHandler represents the Sarama consumer group handler
+type ConsumerGroupHandler struct{}
 
-	// Create new consumer
-	conn, err := sarama.NewConsumer(brokersUrl, config)
-	if err != nil {
-		return nil, err
+// Setup is run at the beginning of a new session, before ConsumeClaim
+func (ConsumerGroupHandler) Setup(sarama.ConsumerGroupSession) error {
+	return nil
+}
+
+// Cleanup is run at the end of a session, once all ConsumeClaim goroutines have exited
+func (ConsumerGroupHandler) Cleanup(sarama.ConsumerGroupSession) error {
+	return nil
+}
+
+// ConsumeClaim must start a consumer loop of ConsumerGroupClaim's Messages()
+func (ConsumerGroupHandler) ConsumeClaim(session sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
+	for message := range claim.Messages() {
+		fmt.Printf("Message claimed: value = %s, timestamp = %v, topic = %s\n", string(message.Value), message.Timestamp, message.Topic)
+		session.MarkMessage(message, "")
 	}
-
-	return conn, nil
+	return nil
 }

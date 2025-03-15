@@ -65,26 +65,61 @@ func PushCommentToQueue(topic string, message []byte) error {
 	return nil
 }
 
+func PushCommentToQueueWithPartition(topic string, message []byte, partition int32) error {
+
+	brokersUrl := []string{"localhost:29092"}
+	producer, err := ConnectProducer(brokersUrl)
+	if err != nil {
+		return err
+	}
+
+	defer producer.Close()
+
+	msg := &sarama.ProducerMessage{
+		Topic:     topic,
+		Value:     sarama.StringEncoder(message),
+		Partition: partition,
+	}
+
+	partition, offset, err := producer.SendMessage(msg)
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("Message is stored in topic(%s)/partition(%d)/offset(%d)\n", topic, partition, offset)
+
+	return nil
+}
+
 // createComment handler
 func createComment(c *fiber.Ctx) error {
 
 	// Instantiate new Message struct
-	cmt := new(Comment)
-
-	//  Parse body into comment struct
-	if err := c.BodyParser(cmt); err != nil {
-		log.Println(err)
-		c.Status(400).JSON(&fiber.Map{
-			"success": false,
-			"message": err,
-		})
+	cmt, cmtInBytes, err, shouldReturn, err := getCommentBytes(c)
+	if shouldReturn {
 		return err
 	}
-	// convert body into bytes and send it to kafka
-	cmtInBytes, err := json.Marshal(cmt)
 	PushCommentToQueue("comments", cmtInBytes)
 
 	// Return Comment in JSON format
+	return handleResponse(err, c, cmt)
+}
+
+// createComment handler
+func createCommentWithPartition(c *fiber.Ctx) error {
+
+	// Instantiate new Message struct
+	cmt, cmtInBytes, err, shouldReturn, err := getCommentBytes(c)
+	if shouldReturn {
+		return err
+	}
+	PushCommentToQueueWithPartition("comments", cmtInBytes)
+
+	// Return Comment in JSON format
+	return handleResponse(err, c, cmt)
+}
+
+func handleResponse(err error, c *fiber.Ctx, cmt *Comment) error {
 	err = c.JSON(&fiber.Map{
 		"success": true,
 		"message": "Comment pushed successfully",
@@ -99,4 +134,24 @@ func createComment(c *fiber.Ctx) error {
 	}
 
 	return err
+}
+
+func getCommentBytes(c *fiber.Ctx) (*Comment, []byte, error, bool, error) {
+	cmt := new(Comment)
+
+	//  Parse body into comment struct
+	if err := c.BodyParser(cmt); err != nil {
+		log.Println(err)
+		c.Status(400).JSON(&fiber.Map{
+			"success": false,
+			"message": err,
+		})
+		return nil, nil, nil,
+
+			// convert body into bytes and send it to kafka
+			true, err
+	}
+
+	cmtInBytes, err := json.Marshal(cmt)
+	return cmt, cmtInBytes, err, false, nil
 }
